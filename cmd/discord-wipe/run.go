@@ -466,13 +466,13 @@ func startMetrics(st *state.State) {
 // ---------------------------------------------------------------------------
 
 func init() {
-	cmdRun.Flags().StringVar(&statePath, "state", "/data/state/state.json", "state file path")
-	cmdRun.Flags().StringVar(&exportDir, "export-dir", "/data/export/Messages", "export directory")
-	cmdRun.Flags().Float64Var(&retentionDays, "retention-days", 14, "messages older than N days are deleted")
-	cmdRun.Flags().Float64Var(&deleteDelay, "delete-delay", 1.0, "seconds between DELETE calls")
-	cmdRun.Flags().Float64Var(&searchDelay, "search-delay", 15.0, "seconds between search page fetches")
-	cmdRun.Flags().Float64Var(&intervalHours, "interval-hours", 24, "hours between passes when --watch")
-	cmdRun.Flags().BoolVar(&watch, "watch", false, "loop forever instead of single pass")
+	cmdRun.Flags().StringVar(&statePath, "state", envDefault("STATE_PATH", "/data/state/state.json"), "state file path")
+	cmdRun.Flags().StringVar(&exportDir, "export-dir", envDefault("EXPORT_DIR", "/data/export/Messages"), "export directory")
+	cmdRun.Flags().Float64Var(&retentionDays, "retention-days", envFloat("RETENTION_DAYS", 14), "messages older than N days are deleted")
+	cmdRun.Flags().Float64Var(&deleteDelay, "delete-delay", envFloat("DELETE_DELAY", 1.0), "seconds between DELETE calls")
+	cmdRun.Flags().Float64Var(&searchDelay, "search-delay", envFloat("SEARCH_DELAY", 15.0), "seconds between search page fetches")
+	cmdRun.Flags().Float64Var(&intervalHours, "interval-hours", envFloat("INTERVAL_HOURS", 24), "hours between passes when --watch")
+	cmdRun.Flags().BoolVar(&watch, "watch", envBool("WATCH", false), "loop forever instead of single pass")
 	cmdRun.Flags().BoolVar(&dryRun, "dry-run", false, "report without deleting")
 	cmdRun.Flags().StringSliceVar(&excludeGuilds, "exclude-guild", nil, "guild ID to skip (repeatable)")
 	cmdRun.Flags().StringSliceVar(&excludeChans, "exclude-channel", nil, "channel ID to skip (repeatable)")
@@ -488,6 +488,18 @@ func envDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envFloat(key string, fallback float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	var result float64
+	if _, err := fmt.Sscanf(v, "%f", &result); err != nil {
+		return fallback
+	}
+	return result
 }
 
 func envBool(key string, fallback bool) bool {

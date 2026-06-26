@@ -1,6 +1,6 @@
 services:
   discord-wipe:
-    image: ghcr.io/erfianugrah/discord-wipe:main
+    image: ghcr.io/erfianugrah/discord-wipe-go:main
     build:
       context: .
       dockerfile: Dockerfile
@@ -25,7 +25,7 @@ services:
     restart: unless-stopped
     mem_limit: 256M
     healthcheck:
-      test: ["CMD", "test", "-f", "/data/state/heartbeat"]
+      test: ["CMD", "/discord-wipe", "status", "--state", "/data/state/state.json"]
       interval: 2m
       timeout: 10s
       retries: 2
