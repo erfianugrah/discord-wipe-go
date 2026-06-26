@@ -1,0 +1,32 @@
+services:
+  discord-wipe:
+    image: ghcr.io/erfianugrah/discord-wipe:main
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: discord-wipe
+    env_file: .env
+    environment:
+      - RETENTION_DAYS=14
+      - INTERVAL_HOURS=24
+      - DELETE_DELAY=1.0
+      - SEARCH_DELAY=15.0
+      - WATCH=1
+      - NTFY_URL=${NTFY_URL:-}
+      - METRICS_ENABLED=${METRICS_ENABLED:-true}
+      - METRICS_BIND=0.0.0.0:9090
+      - STATE_PATH=/data/state/state.json
+      - EXPORT_DIR=/data/export/Messages
+    volumes:
+      - ${DISCORD_WIPE_DATA_DIR:-/mnt/user/discord-wipe}/export:/data/export:ro
+      - ${DISCORD_WIPE_DATA_DIR:-/mnt/user/discord-wipe}/state:/data/state
+    ports:
+      - "127.0.0.1:9090:9090"
+    restart: unless-stopped
+    mem_limit: 256M
+    healthcheck:
+      test: ["CMD", "test", "-f", "/data/state/heartbeat"]
+      interval: 2m
+      timeout: 10s
+      retries: 2
+      start_period: 30s
