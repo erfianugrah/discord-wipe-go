@@ -441,7 +441,7 @@ func (c *Client) FetchMessages(channelID string, beforeID, afterID int64, limit 
 		return nil, false, fmt.Errorf("fetch messages: HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	parseBody:
+parseBody:
 	var msgs []FetchedMessage
 	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
 		return nil, false, fmt.Errorf("decode messages: %w", err)

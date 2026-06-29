@@ -259,6 +259,14 @@ Use 'search' first to preview what would be deleted.`,
 		ctx, cancel := signalCtx()
 		defer cancel()
 
+		// Re-resolve shared-global flags (see cmdRun.Run). purge's retention
+		// defaults to 0 — delete everything in scope, regardless of age — and is
+		// intentionally env-independent so a stray RETENTION_DAYS can't narrow it.
+		retentionDays = resolveFloat(cmd, "retention-days", "", 0)
+		deleteDelay = resolveFloat(cmd, "delete-delay", "DELETE_DELAY", 1.0)
+		searchDelay = resolveFloat(cmd, "search-delay", "SEARCH_DELAY", 15.0)
+		statePath = resolveString(cmd, "state", "STATE_PATH", "/data/state/state.json")
+
 		if len(searchGuilds) == 0 && len(searchChannels) == 0 {
 			fmt.Fprintln(os.Stderr, "ERROR: specify at least one --guild GUILD_ID or --channel CHANNEL_ID")
 			os.Exit(2)
@@ -276,7 +284,7 @@ Use 'search' first to preview what would be deleted.`,
 		fmt.Printf("[purge] state: %s (%d IDs already done; export_consumed=%v)\n",
 			statePath, s.Len(), s.ExportConsumed)
 
-		cutoff := time.Now().UTC().Add(-time.Duration(retentionDays*24) * time.Hour)
+		cutoff := retentionCutoff(time.Now().UTC(), retentionDays)
 		cutoffSF := snowflake.At(cutoff)
 
 		// Build targets

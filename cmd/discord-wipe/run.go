@@ -39,6 +39,22 @@ With --watch, loops forever. Otherwise runs one pass and exits.`,
 
 		slog.Info("discord-wipe", "version", version)
 
+		// Re-resolve env-backed flags. Several commands bind the SAME package
+		// globals with DIFFERENT defaults (notably purge binds retentionDays=0).
+		// Go runs init() in filename order, so search.go (purge) registers AFTER
+		// run.go and clobbers the shared variable's starting value; pflag does
+		// not reset an unset flag during Parse. Without this guard `run`
+		// inherited purge's retentionDays=0 and deleted EVERY message regardless
+		// of age (the "deletes everything" bug). Honour an explicitly-passed
+		// flag; otherwise re-derive from the environment / this command's default.
+		retentionDays = resolveFloat(cmd, "retention-days", "RETENTION_DAYS", 14)
+		deleteDelay = resolveFloat(cmd, "delete-delay", "DELETE_DELAY", 1.0)
+		searchDelay = resolveFloat(cmd, "search-delay", "SEARCH_DELAY", 15.0)
+		intervalHours = resolveFloat(cmd, "interval-hours", "INTERVAL_HOURS", 24)
+		watch = resolveBool(cmd, "watch", "WATCH", false)
+		statePath = resolveString(cmd, "state", "STATE_PATH", "/data/state/state.json")
+		exportDir = resolveString(cmd, "export-dir", "EXPORT_DIR", "/data/export/Messages")
+
 		// --- state init with parking ---
 		st, err := state.New(statePath)
 		if err != nil {
@@ -139,8 +155,8 @@ With --watch, loops forever. Otherwise runs one pass and exits.`,
 				)
 			}
 
-			cutoff := time.Now().UTC().Add(-time.Duration(retentionDays*24) * time.Hour)
-			slog.Info("pass start", "cutoff", cutoff.Format(time.RFC3339))
+			cutoff := retentionCutoff(time.Now().UTC(), retentionDays)
+			slog.Info("pass start", "cutoff", cutoff.Format(time.RFC3339), "retention_days", retentionDays)
 			t0 := time.Now()
 
 			// --- export phase ---
@@ -211,7 +227,7 @@ func phaseExport(ctx context.Context, c *discord.Client, meID string, st *state.
 
 	// Pre-parse all channels
 	type channelData struct {
-		ch  export.Channel
+		ch   export.Channel
 		msgs []export.Message
 	}
 	var parsed []channelData
@@ -510,4 +526,50 @@ func envBool(key string, fallback bool) bool {
 	return v == "1" || v == "true" || v == "yes"
 }
 
+// retentionCutoff returns the timestamp `days` days before `now`. Messages with
+// a timestamp strictly older than the cutoff are eligible for deletion; days=0
+// yields `now` (delete everything). Centralised so the float→Duration
+// conversion lives in one tested place.
+func retentionCutoff(now time.Time, days float64) time.Time {
+	return now.Add(-time.Duration(days*24) * time.Hour)
+}
 
+// resolveFloat returns the effective value of a float flag that is bound to a
+// shared package global. If the flag was explicitly set on the command line we
+// honour the parsed value; otherwise we re-derive from the environment (or the
+// supplied default) so a default registered by a DIFFERENT command can't leak
+// in via the shared variable. See the guard block in cmdRun.Run for why.
+func resolveFloat(cmd *cobra.Command, name, envKey string, def float64) float64 {
+	if cmd.Flags().Changed(name) {
+		v, _ := cmd.Flags().GetFloat64(name)
+		return v
+	}
+	if envKey != "" {
+		return envFloat(envKey, def)
+	}
+	return def
+}
+
+// resolveBool is resolveFloat for bool flags.
+func resolveBool(cmd *cobra.Command, name, envKey string, def bool) bool {
+	if cmd.Flags().Changed(name) {
+		v, _ := cmd.Flags().GetBool(name)
+		return v
+	}
+	if envKey != "" {
+		return envBool(envKey, def)
+	}
+	return def
+}
+
+// resolveString is resolveFloat for string flags.
+func resolveString(cmd *cobra.Command, name, envKey, def string) string {
+	if cmd.Flags().Changed(name) {
+		v, _ := cmd.Flags().GetString(name)
+		return v
+	}
+	if envKey != "" {
+		return envDefault(envKey, def)
+	}
+	return def
+}

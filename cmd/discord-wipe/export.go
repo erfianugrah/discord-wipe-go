@@ -16,13 +16,13 @@ import (
 )
 
 var (
-	exportOutput    string
-	exportAll       bool
-	exportPerChan   int
-	leaveInactive   int
-	closeInactive   int
-	leaveDryRun     bool
-	leaveConfirm    bool
+	exportOutput  string
+	exportAll     bool
+	exportPerChan int
+	leaveInactive int
+	closeInactive int
+	leaveDryRun   bool
+	leaveConfirm  bool
 )
 
 // ---------------------------------------------------------------------------

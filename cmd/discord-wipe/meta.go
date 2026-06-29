@@ -142,7 +142,7 @@ var cmdSeed = &cobra.Command{
 	Short: "Mark export messages older than cutoff as already-deleted (recovery).",
 	Run: func(cmd *cobra.Command, args []string) {
 		s := newState()
-		cutoff := time.Now().UTC().Add(-time.Duration(retentionDays*24) * time.Hour)
+		cutoff := retentionCutoff(time.Now().UTC(), retentionDays)
 		before := s.Len()
 		fmt.Printf("[seed] state=%s: %d IDs already marked, export_consumed=%v\n",
 			statePath, before, s.ExportConsumed)
