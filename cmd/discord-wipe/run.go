@@ -160,15 +160,29 @@ With --watch, loops forever. Otherwise runs one pass and exits.`,
 			t0 := time.Now()
 
 			// --- export phase ---
-			if _, err := os.Stat(exportDir); err == nil && !st.ExportConsumed {
-				phaseExport(ctx, c, me.ID, st, cutoff, dryRun)
-			} else if os.IsNotExist(err) {
+			var passErr error
+			if _, statErr := os.Stat(exportDir); statErr == nil && !st.ExportConsumed {
+				passErr = phaseExport(ctx, c, me.ID, st, cutoff, dryRun)
+			} else if os.IsNotExist(statErr) {
 				slog.Info("no export dir, skipping export phase", "dir", exportDir)
 			}
 
 			// --- live catchup phase ---
-			if ctx.Err() == nil {
-				phaseLiveCatchupAll(ctx, c, me.ID, st, cutoff, dryRun)
+			if passErr == nil && ctx.Err() == nil {
+				passErr = phaseLiveCatchupAll(ctx, c, me.ID, st, cutoff, dryRun)
+			}
+
+			// A 401 anywhere in the pass is terminal — the token was rejected.
+			// Persist progress, then park (Discord user tokens have no refresh).
+			if ae, ok := passErr.(*discord.AuthError); ok {
+				st.Save() //nolint:errcheck
+				park("token-rejected", "DISCORD TOKEN REJECTED MID-PASS",
+					fmt.Sprintf("reason: %s", ae.Message),
+					"The token was accepted at startup but rejected mid-pass.\n"+
+						"Discord user tokens have NO refresh flow — rotate via .env + redeploy.\n")
+			}
+			if passErr != nil {
+				slog.Error("pass error", "err", passErr)
 			}
 
 			st.LastPassAt = time.Now().UTC().Format(time.RFC3339)
@@ -208,13 +222,13 @@ With --watch, loops forever. Otherwise runs one pass and exits.`,
 // ---------------------------------------------------------------------------
 
 func phaseExport(ctx context.Context, c *discord.Client, meID string, st *state.State,
-	cutoff time.Time, dryRun bool) {
+	cutoff time.Time, dryRun bool) error {
 
 	slog.Info("export phase: reading", "dir", exportDir)
 	channels, err := export.ReadExport(exportDir)
 	if err != nil {
 		slog.Error("read export", "err", err)
-		return
+		return nil
 	}
 	slog.Info("export phase", "channels", len(channels), "cutoff", cutoff.Format(time.RFC3339))
 
@@ -263,7 +277,7 @@ func phaseExport(ctx context.Context, c *discord.Client, meID string, st *state.
 	for ci, pd := range parsed {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		default:
 		}
 
@@ -302,7 +316,7 @@ func phaseExport(ctx context.Context, c *discord.Client, meID string, st *state.
 		for _, m := range targets {
 			select {
 			case <-ctx.Done():
-				return
+				return nil
 			default:
 			}
 			if dryRun {
@@ -312,7 +326,11 @@ func phaseExport(ctx context.Context, c *discord.Client, meID string, st *state.
 			}
 
 			for {
-				result := c.DeleteMessage(pd.ch.ID, m.ID)
+				result, derr := c.DeleteMessage(pd.ch.ID, m.ID)
+				if derr != nil {
+					st.Save() //nolint:errcheck
+					return derr
+				}
 				switch result.Status {
 				case "retry":
 					slog.Debug("rate-limited", "sleep", fmt.Sprintf("%.1fs", result.RetryAfter))
@@ -352,11 +370,12 @@ func phaseExport(ctx context.Context, c *discord.Client, meID string, st *state.
 	}
 
 	if !dryRun {
-		st.ExportConsumed = true
+		st.SetExportConsumed(true)
 	}
 	st.Save() //nolint:errcheck
 	slog.Info("export done", "ok", ec.ok, "gone", ec.gone, "forbidden", ec.forbidden,
 		"skip_recent", ec.skipRecent, "skip_done", ec.skipDone)
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -364,7 +383,7 @@ func phaseExport(ctx context.Context, c *discord.Client, meID string, st *state.
 // ---------------------------------------------------------------------------
 
 func phaseLiveCatchupAll(ctx context.Context, c *discord.Client, meID string, st *state.State,
-	cutoff time.Time, dryRun bool) {
+	cutoff time.Time, dryRun bool) error {
 
 	cutoffSF := snowflake.At(cutoff)
 	guilds, _ := c.ListGuilds()
@@ -405,8 +424,9 @@ func phaseLiveCatchupAll(ctx context.Context, c *discord.Client, meID string, st
 		targets = append(targets, ScopedTarget{"channel", ch.ID, kind + ":" + ch.ID})
 	}
 
-	counts := liveCatchup(ctx, c, meID, st, targets, cutoffSF, dryRun)
+	counts, err := liveCatchup(ctx, c, meID, st, targets, cutoffSF, dryRun)
 	slog.Info("catchup done", "ok", counts.ok, "gone", counts.gone, "forbidden", counts.forbidden)
+	return err
 }
 
 // ---------------------------------------------------------------------------
@@ -464,7 +484,7 @@ func startMetrics(st *state.State) {
 		fmt.Fprintf(w, "# HELP discord_wipe_export_consumed 1 if export phase has run\n")
 		fmt.Fprintf(w, "# TYPE discord_wipe_export_consumed gauge\n")
 		consumed := 0
-		if metricState.ExportConsumed {
+		if metricState.IsExportConsumed() {
 			consumed = 1
 		}
 		fmt.Fprintf(w, "discord_wipe_export_consumed %d\n", consumed)

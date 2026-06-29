@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -20,6 +21,12 @@ type State struct {
 	path          string
 	backupPath    string
 	heartbeatPath string
+
+	// mu guards Deleted and ExportConsumed against concurrent access by the
+	// /metrics HTTP goroutine (reads) and the wipe loop (writes). Before this
+	// lock, a metrics scrape racing a Mark()/ExportConsumed write tripped the
+	// Go race detector and risked a torn read of the deleted-count gauge.
+	mu sync.RWMutex
 
 	Deleted        map[string]bool `json:"deleted"`
 	ExportConsumed bool            `json:"export_consumed"`
@@ -89,12 +96,13 @@ func (s *State) quarantine(candidate string, err error) {
 
 // Save writes the state durably to disk.
 func (s *State) Save() error {
+	// Snapshot the mutable fields under the read lock, then do file I/O
+	// outside it so an fsync can't block Mark()/metrics for the disk latency.
+	s.mu.RLock()
 	ids := make([]string, 0, len(s.Deleted))
 	for id := range s.Deleted {
 		ids = append(ids, id)
 	}
-	sort.Strings(ids)
-
 	payload := struct {
 		Deleted        []string `json:"deleted"`
 		ExportConsumed bool     `json:"export_consumed"`
@@ -108,6 +116,9 @@ func (s *State) Save() error {
 		LastStartedAt:  s.LastStartedAt,
 		RestartBurst:   s.RestartBurst,
 	}
+	s.mu.RUnlock()
+
+	sort.Strings(payload.Deleted)
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal state: %w", err)
@@ -154,15 +165,36 @@ func (s *State) touchHeartbeat() {
 
 // Mark records a message ID as deleted.
 func (s *State) Mark(msgID string) {
+	s.mu.Lock()
 	s.Deleted[msgID] = true
+	s.mu.Unlock()
 }
 
 // IsDeleted checks whether a message ID has already been deleted.
 func (s *State) IsDeleted(msgID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.Deleted[msgID]
 }
 
 // Len returns the count of tracked deleted IDs.
 func (s *State) Len() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return len(s.Deleted)
+}
+
+// SetExportConsumed records (under lock) that the export phase has run.
+func (s *State) SetExportConsumed(v bool) {
+	s.mu.Lock()
+	s.ExportConsumed = v
+	s.mu.Unlock()
+}
+
+// IsExportConsumed reports (under lock) whether the export phase has run.
+// Use this from the metrics goroutine; the wipe loop may write concurrently.
+func (s *State) IsExportConsumed() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ExportConsumed
 }

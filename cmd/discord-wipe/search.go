@@ -174,7 +174,11 @@ Examples:
 				Content:   searchContent,
 				ChannelID: s.chanFilter,
 			}
-			total, hits, retry := c.SearchMessages(s.typ, s.id, params)
+			total, hits, retry, serr := c.SearchMessages(s.typ, s.id, params)
+			if _, ok := serr.(*discord.AuthError); ok {
+				fmt.Fprintf(os.Stderr, "\ntoken rejected mid-search: %v\n", serr)
+				os.Exit(2)
+			}
 
 			if total < 0 {
 				fmt.Printf("[%s] 🔒 no permission\n\n", s.label)
@@ -308,9 +312,13 @@ Use 'search' first to preview what would be deleted.`,
 			labels, cutoff.Format(time.RFC3339), retentionDays, dryLabel)
 
 		t0 := time.Now()
-		counts := liveCatchup(ctx, c, me.ID, s, targets, cutoffSF, dryRun)
+		counts, err := liveCatchup(ctx, c, me.ID, s, targets, cutoffSF, dryRun)
 		s.LastPassAt = time.Now().UTC().Format(time.RFC3339)
 		s.Save() //nolint:errcheck
+		if _, ok := err.(*discord.AuthError); ok {
+			fmt.Fprintf(os.Stderr, "[purge] token rejected mid-purge: %v\n", err)
+			os.Exit(2)
+		}
 		elapsed := time.Since(t0)
 		fmt.Printf("[purge] === done in %s (%.0fs) === ok=%d gone=%d forbidden=%d\n",
 			durStr(elapsed), elapsed.Seconds(), counts.ok, counts.gone, counts.forbidden)
@@ -330,8 +338,12 @@ type catchupCounts struct {
 	ok, gone, forbidden int
 }
 
+// liveCatchup sweeps each target scope via the author-filtered search API and
+// deletes every hit older than cutoffSF. Returns a non-nil error ONLY when the
+// token is rejected mid-sweep (terminal); per-scope 403/404 are skipped, not
+// surfaced. Shared by `run` and `purge`.
 func liveCatchup(ctx context.Context, c *discord.Client, meID string, st *state.State,
-	targets []ScopedTarget, cutoffSF int64, dryRun bool) catchupCounts {
+	targets []ScopedTarget, cutoffSF int64, dryRun bool) (catchupCounts, error) {
 
 	var counts catchupCounts
 	searchD := time.Duration(searchDelay * float64(time.Second))
@@ -340,7 +352,7 @@ func liveCatchup(ctx context.Context, c *discord.Client, meID string, st *state.
 	for ti, t := range targets {
 		select {
 		case <-ctx.Done():
-			return counts
+			return counts, nil
 		default:
 		}
 		fmt.Printf("[catchup %d/%d] %s\n", ti+1, len(targets), t.Label)
@@ -352,7 +364,7 @@ func liveCatchup(ctx context.Context, c *discord.Client, meID string, st *state.
 		for {
 			select {
 			case <-ctx.Done():
-				return counts
+				return counts, nil
 			default:
 			}
 
@@ -360,7 +372,11 @@ func liveCatchup(ctx context.Context, c *discord.Client, meID string, st *state.
 				AuthorID: meID,
 				MaxID:    cutoffSF,
 			}
-			total, hits, retry := c.SearchMessages(t.Scope, t.ID, params)
+			total, hits, retry, serr := c.SearchMessages(t.Scope, t.ID, params)
+			if serr != nil {
+				st.Save() //nolint:errcheck
+				return counts, serr
+			}
 			if retry > 0 {
 				fmt.Printf("  rate-limited / index lag; sleep %.1fs\n", retry)
 				time.Sleep(time.Duration(retry * float64(time.Second)))
@@ -396,7 +412,7 @@ func liveCatchup(ctx context.Context, c *discord.Client, meID string, st *state.
 			for _, m := range hits {
 				select {
 				case <-ctx.Done():
-					return counts
+					return counts, nil
 				default:
 				}
 				if st.IsDeleted(m.ID) {
@@ -409,7 +425,11 @@ func liveCatchup(ctx context.Context, c *discord.Client, meID string, st *state.
 				}
 
 				for {
-					result := c.DeleteMessage(m.ChannelID, m.ID)
+					result, derr := c.DeleteMessage(m.ChannelID, m.ID)
+					if derr != nil {
+						st.Save() //nolint:errcheck
+						return counts, derr
+					}
 					switch result.Status {
 					case "retry":
 						fmt.Printf("    rate-limited; sleep %.1fs\n", result.RetryAfter)
@@ -449,7 +469,7 @@ func liveCatchup(ctx context.Context, c *discord.Client, meID string, st *state.
 			time.Sleep(searchD)
 		}
 	}
-	return counts
+	return counts, nil
 }
 
 // ---------------------------------------------------------------------------

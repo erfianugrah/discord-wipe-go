@@ -28,15 +28,17 @@ const (
 
 // Client is a Discord HTTP client bound to a user token.
 type Client struct {
-	token  string
-	client *http.Client
-	log    *slog.Logger
+	token   string
+	baseURL string // defaults to API; overridable in tests via httptest
+	client  *http.Client
+	log     *slog.Logger
 }
 
 // NewClient creates a Discord client for the given token.
 func NewClient(token string) *Client {
 	return &Client{
-		token: token,
+		token:   token,
+		baseURL: API,
 		client: &http.Client{
 			Timeout: 60 * time.Second,
 			Transport: &http.Transport{
@@ -70,7 +72,7 @@ type User struct {
 
 // GetMe returns the authenticated user.
 func (c *Client) GetMe() (*User, error) {
-	resp, err := c.do("GET", API+"/users/@me", nil)
+	resp, err := c.do("GET", c.baseURL+"/users/@me", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +106,7 @@ type Guild struct {
 
 // ListGuilds returns all guilds the user is a member of.
 func (c *Client) ListGuilds() ([]Guild, error) {
-	resp, err := c.do("GET", API+"/users/@me/guilds", nil)
+	resp, err := c.do("GET", c.baseURL+"/users/@me/guilds", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +128,7 @@ func (c *Client) ListGuilds() ([]Guild, error) {
 
 // GetGuild fetches a single guild by ID.
 func (c *Client) GetGuild(guildID string) (*Guild, error) {
-	resp, err := c.do("GET", API+"/guilds/"+guildID, nil)
+	resp, err := c.do("GET", c.baseURL+"/guilds/"+guildID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +152,7 @@ type Channel struct {
 
 // ListGuildChannels returns all channels in a guild.
 func (c *Client) ListGuildChannels(guildID string) ([]Channel, error) {
-	resp, err := c.do("GET", API+"/guilds/"+guildID+"/channels", nil)
+	resp, err := c.do("GET", c.baseURL+"/guilds/"+guildID+"/channels", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +186,7 @@ type DMRecipient struct {
 
 // ListDMs returns all open DM channels.
 func (c *Client) ListDMs() ([]DMChannel, error) {
-	resp, err := c.do("GET", API+"/users/@me/channels", nil)
+	resp, err := c.do("GET", c.baseURL+"/users/@me/channels", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -235,12 +237,12 @@ type SearchParams struct {
 //
 // Returns (total_results, hits, retry_after_seconds).
 // On 429, retry_after is the wait time. On 403/404, total_results is -1.
-func (c *Client) SearchMessages(scope string, scopeID string, params SearchParams) (int, []SearchResult, float64) {
+func (c *Client) SearchMessages(scope string, scopeID string, params SearchParams) (int, []SearchResult, float64, error) {
 	var url string
 	if scope == "guild" {
-		url = fmt.Sprintf("%s/guilds/%s/messages/search", API, scopeID)
+		url = fmt.Sprintf("%s/guilds/%s/messages/search", c.baseURL, scopeID)
 	} else {
-		url = fmt.Sprintf("%s/channels/%s/messages/search", API, scopeID)
+		url = fmt.Sprintf("%s/channels/%s/messages/search", c.baseURL, scopeID)
 	}
 
 	q := make(map[string]string)
@@ -263,33 +265,37 @@ func (c *Client) SearchMessages(scope string, scopeID string, params SearchParam
 	resp, err := c.do("GET", url, q)
 	if err != nil {
 		c.log.Error("search request failed", "err", err)
-		return 0, nil, 0
+		return 0, nil, 0, nil
 	}
 	defer resp.Body.Close()
 
+	// 401 is terminal: the token was rejected. Return a typed error so the
+	// caller can park/exit instead of crashing. (Previously this panicked
+	// with no recover() anywhere — a mid-pass token rotation killed the
+	// daemon outright.)
 	if resp.StatusCode == 401 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
-		panic(&AuthError{Message: string(body)}) // caught by main
+		return 0, nil, 0, &AuthError{Message: string(body)}
 	}
 
 	if resp.StatusCode == 429 {
 		retry := parseRetryAfter(resp)
-		return 0, nil, retry
+		return 0, nil, retry, nil
 	}
 	if resp.StatusCode == 202 {
 		retry := parseRetryAfter(resp)
 		if retry == 0 {
 			retry = 5
 		}
-		return 0, nil, retry
+		return 0, nil, retry, nil
 	}
 	if resp.StatusCode == 403 || resp.StatusCode == 404 {
-		return -1, nil, 0
+		return -1, nil, 0, nil
 	}
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
 		c.log.Error("search HTTP error", "status", resp.StatusCode, "body", string(body))
-		return 0, nil, 0
+		return 0, nil, 0, nil
 	}
 
 	// Discord's search response nests messages in groups:
@@ -305,7 +311,7 @@ func (c *Client) SearchMessages(scope string, scopeID string, params SearchParam
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		c.log.Error("decode search response", "err", err)
-		return 0, nil, 0
+		return 0, nil, 0, nil
 	}
 
 	var hits []SearchResult
@@ -320,7 +326,7 @@ func (c *Client) SearchMessages(scope string, scopeID string, params SearchParam
 			}
 		}
 	}
-	return raw.TotalResults, hits, 0
+	return raw.TotalResults, hits, 0, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -329,17 +335,20 @@ func (c *Client) SearchMessages(scope string, scopeID string, params SearchParam
 
 // DeleteResult is the outcome of a delete operation.
 type DeleteResult struct {
-	Status     string  // "ok", "gone", "forbidden", "retry"
+	Status     string  // "ok", "gone", "forbidden", "retry", "auth"
 	RetryAfter float64 // seconds to wait before next attempt
 }
 
-// DeleteMessage deletes one message. Returns the status and a pacing hint.
-func (c *Client) DeleteMessage(channelID, msgID string) DeleteResult {
-	url := fmt.Sprintf("%s/channels/%s/messages/%s", API, channelID, msgID)
+// DeleteMessage deletes one message. Returns the status, a pacing hint, and a
+// non-nil error ONLY when the token was rejected (401) — a terminal condition
+// the caller must park/exit on rather than retry. 403/400 are non-fatal
+// "forbidden" (skipped, never retried — the only-my-messages defence in depth).
+func (c *Client) DeleteMessage(channelID, msgID string) (DeleteResult, error) {
+	url := fmt.Sprintf("%s/channels/%s/messages/%s", c.baseURL, channelID, msgID)
 	resp, err := c.do("DELETE", url, nil)
 	if err != nil {
 		c.log.Error("delete request failed", "err", err)
-		return DeleteResult{Status: "retry", RetryAfter: 5}
+		return DeleteResult{Status: "retry", RetryAfter: 5}, nil
 	}
 	defer resp.Body.Close()
 
@@ -347,31 +356,31 @@ func (c *Client) DeleteMessage(channelID, msgID string) DeleteResult {
 
 	switch resp.StatusCode {
 	case 204:
-		return DeleteResult{Status: "ok", RetryAfter: bucketHint}
+		return DeleteResult{Status: "ok", RetryAfter: bucketHint}, nil
 	case 404:
-		return DeleteResult{Status: "gone", RetryAfter: bucketHint}
+		return DeleteResult{Status: "gone", RetryAfter: bucketHint}, nil
 	case 400:
 		// Terminal errors: archived thread, missing access, system message.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
 		c.log.Debug("delete terminal 400", "channel", channelID, "msg", msgID, "body", string(body))
-		return DeleteResult{Status: "forbidden"}
+		return DeleteResult{Status: "forbidden"}, nil
 	case 403:
-		return DeleteResult{Status: "forbidden"}
+		return DeleteResult{Status: "forbidden"}, nil
 	case 429:
 		retry := parseRetryAfter(resp)
 		if retry == 0 {
 			retry = 1
 		}
-		return DeleteResult{Status: "retry", RetryAfter: retry}
+		return DeleteResult{Status: "retry", RetryAfter: retry}, nil
 	case 401:
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
-		panic(&AuthError{Message: string(body)})
+		return DeleteResult{Status: "auth"}, &AuthError{Message: string(body)}
 	default:
 		if resp.StatusCode >= 500 {
-			return DeleteResult{Status: "retry", RetryAfter: 5}
+			return DeleteResult{Status: "retry", RetryAfter: 5}, nil
 		}
 		c.log.Warn("unexpected delete response", "status", resp.StatusCode)
-		return DeleteResult{Status: "retry", RetryAfter: 2}
+		return DeleteResult{Status: "retry", RetryAfter: 2}, nil
 	}
 }
 
@@ -401,7 +410,7 @@ type FetchedMessage struct {
 // beforeID=0 fetches the most recent messages. afterID=0 means no lower bound.
 // Returns (messages, hasMore).
 func (c *Client) FetchMessages(channelID string, beforeID, afterID int64, limit int) ([]FetchedMessage, bool, error) {
-	url := fmt.Sprintf("%s/channels/%s/messages", API, channelID)
+	url := fmt.Sprintf("%s/channels/%s/messages", c.baseURL, channelID)
 	q := make(map[string]string)
 	q["limit"] = strconv.Itoa(limit)
 	if beforeID > 0 {
@@ -452,7 +461,7 @@ parseBody:
 
 // LeaveGuild leaves a guild (DELETE /users/@me/guilds/{id}).
 func (c *Client) LeaveGuild(guildID string) error {
-	url := fmt.Sprintf("%s/users/@me/guilds/%s", API, guildID)
+	url := fmt.Sprintf("%s/users/@me/guilds/%s", c.baseURL, guildID)
 	// Retry on 429
 	for attempt := 0; attempt < 3; attempt++ {
 		resp, err := c.do("DELETE", url, nil)
@@ -482,7 +491,7 @@ func (c *Client) LeaveGuild(guildID string) error {
 
 // CloseDM closes a DM channel (DELETE /channels/{id}).
 func (c *Client) CloseDM(channelID string) error {
-	url := fmt.Sprintf("%s/channels/%s", API, channelID)
+	url := fmt.Sprintf("%s/channels/%s", c.baseURL, channelID)
 	for attempt := 0; attempt < 3; attempt++ {
 		resp, err := c.do("DELETE", url, nil)
 		if err != nil {

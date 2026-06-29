@@ -17,7 +17,7 @@ import (
 	"github.com/erfianugrah/discord-wipe-go/internal/state"
 )
 
-var version = "1.0.1"
+var version = "1.0.2"
 
 var (
 	token          string

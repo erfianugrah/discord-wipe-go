@@ -282,7 +282,10 @@ func runLeave(cmd *cobra.Command, args []string) error {
 				AuthorID: me.ID,
 				MaxID:    cutoffSF,
 			}
-			total, _, _ := c.SearchMessages("guild", g.ID, params)
+			total, _, _, serr := c.SearchMessages("guild", g.ID, params)
+			if serr != nil {
+				return fmt.Errorf("search %s: %w", g.ID, serr)
+			}
 			if total == 0 {
 				targets = append(targets, g)
 			} else if total < 0 {
@@ -379,7 +382,10 @@ func runCloseDMs(cmd *cobra.Command, args []string) error {
 				AuthorID: me.ID,
 				MaxID:    cutoffSF,
 			}
-			total, _, _ := c.SearchMessages("channel", dm.ID, params)
+			total, _, _, serr := c.SearchMessages("channel", dm.ID, params)
+			if serr != nil {
+				return fmt.Errorf("search %s: %w", dm.ID, serr)
+			}
 			if total == 0 {
 				targets = append(targets, dmTarget{dm, true, fmt.Sprintf("inactive > %dd", closeInactive)})
 			} else if total < 0 {
