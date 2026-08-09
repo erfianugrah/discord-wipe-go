@@ -7,7 +7,7 @@ services:
     container_name: discord-wipe
     env_file: .env
     environment:
-      - RETENTION_DAYS=14
+      - RETENTION_DAYS=7
       - INTERVAL_HOURS=24
       - DELETE_DELAY=1.0
       - SEARCH_DELAY=15.0
