@@ -124,12 +124,15 @@ connection-level retry with bounded backoff in `client.do`.
   finished while messages still existed. 50083 now maps to a distinct
   `archived` status handled by the drain; only non-50083 4xx stays
   terminal.
-- **Composer ops git-sync the stack checkout and git-clean it.** A
-  composer `pull` (or `up`) fast-forwards
+- **Any git-sync of the stack checkout git-cleans it.** The stack has
+  `auto_sync=true`: a push to `main` auto-syncs the checkout (but does
+  NOT recreate the container), and a manual composer `pull`/`up` syncs
+  too. Every sync fast-forwards
   `/var/lib/composer/stacks/discord-wipe` to `origin/main` and removes
-  untracked files - observed 2026-08-09 when `.env` was wiped between a
-  `pull` and the subsequent `up`, which then failed with ".env not
-  found". Recreate `.env` (recipe below) immediately before every `up`.
+  untracked files - wiping `.env`, after which the next `up` fails with
+  ".env not found" (observed twice on 2026-08-09: after a manual pull,
+  and after a docs push triggered the auto-sync). Recreate `.env`
+  (recipe below) after EVERY push and always before an `up`.
 - **Toolchain drift.** `go.mod` pins `go 1.26.4`. CI `setup-go` tracks the
   go.dev manifest, so it's pinned to `1.26`. The Dockerfile builder stays on
   `golang:1.25-alpine` (Docker Hub has no stable `golang:1.26-alpine` tag
@@ -172,10 +175,10 @@ calls `Mark()` so catch-up doesn't double-count.
 - Compose stack `discord-wipe`, composer-managed. Composer now runs on
   the MS-01 router (ssh alias `nixos`); the stack checkout lives at
   `/var/lib/composer/stacks/discord-wipe` on nixos (in-container path
-  `/opt/stacks/discord-wipe`). No webhook auto-deploy: a push to `main`
-  does NOT deploy by itself. But composer `pull`/`up` ops DO git-sync the
-  checkout to `origin/main` and git-clean untracked files (see the
-  footgun catalog), so repo and checkout converge on every deploy.
+  `/opt/stacks/discord-wipe`). The stack has `auto_sync=true` with NO
+  auto-deploy: a push to `main` auto-syncs the checkout (and git-cleans
+  it - see the footgun catalog) but never recreates the container.
+  Deploy is always a manual `pull` + `up` via the API below.
 - **Deploy / redeploy** via the composer API on nixos. The API key stays
   in the local env and is piped over ssh stdin (one curl per pipe - the
   stdin config is consumed by the first curl):
