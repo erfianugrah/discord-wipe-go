@@ -22,7 +22,10 @@ targeted wipes, backups, and account cleanup.
    (`GET /users/@me/guilds`) + open DMs (`GET /users/@me/channels`) and
    queries `messages/search?author_id=<self>&max_id=<cutoff_snowflake>` on
    each scope, deleting every hit. The cutoff is encoded as a Discord
-   snowflake so retention is filtered server-side.
+   snowflake so retention is filtered server-side. Hits inside archived
+   threads (Discord refuses deletes there, error 50083) are not skipped:
+   the thread is unarchived, the messages deleted, then the thread is
+   re-archived.
 
 State (`state/state.json`) persists deleted message IDs so crashes,
 restarts, and repeat passes never re-attempt the same ID. Writes are atomic
@@ -88,7 +91,7 @@ read-only `export/` and the read-write `state/`.
 ## Development
 
 ```sh
-go test ./... -race        # 24 tests
+go test ./... -race        # 30 tests
 go vet ./...
 gofmt -l cmd/ internal/
 CGO_ENABLED=0 go build -o /dev/null ./cmd/discord-wipe/
