@@ -159,3 +159,85 @@ func TestBucketPacing(t *testing.T) {
 		t.Fatalf("no headers: got %v, want 0", got)
 	}
 }
+
+// Bug13: deletes in archived threads are refused with error 50083. The client
+// must surface that as a distinct "archived" status (both the 400 and 403
+// envelopes) so the caller can unarchive -> delete -> re-archive, instead of
+// lumping it into terminal "forbidden" and never deleting those messages.
+func TestDeleteArchivedThreadCodeIsArchived(t *testing.T) {
+	for _, httpCode := range []int{400, 403} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(httpCode)
+			fmt.Fprint(w, `{"message":"Thread is archived","code":50083}`)
+		}))
+		res, err := testClient(srv).DeleteMessage("C1", "M1")
+		srv.Close()
+		if err != nil {
+			t.Fatalf("http %d: unexpected error %v", httpCode, err)
+		}
+		if res.Status != "archived" {
+			t.Fatalf("http %d + 50083: status=%q, want archived", httpCode, res.Status)
+		}
+	}
+}
+
+// Companion to Bug13: a 400 that is NOT 50083 (system message, missing
+// access) must stay terminal "forbidden".
+func TestDelete400OtherCodeStaysForbidden(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(400)
+		fmt.Fprint(w, `{"message":"Cannot delete a system message","code":50021}`)
+	}))
+	defer srv.Close()
+
+	res, err := testClient(srv).DeleteMessage("C1", "M1")
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	if res.Status != "forbidden" {
+		t.Fatalf("status=%q, want forbidden", res.Status)
+	}
+}
+
+func TestSetThreadArchivedSendsPatchBody(t *testing.T) {
+	var gotMethod, gotPath, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		buf := make([]byte, 64)
+		n, _ := r.Body.Read(buf)
+		gotBody = string(buf[:n])
+		w.WriteHeader(200)
+		fmt.Fprint(w, `{"id":"T1","thread_metadata":{"archived":false}}`)
+	}))
+	defer srv.Close()
+
+	res, err := testClient(srv).SetThreadArchived("T1", false)
+	if err != nil {
+		t.Fatalf("unexpected error %v", err)
+	}
+	if res.Status != "ok" {
+		t.Fatalf("status=%q, want ok", res.Status)
+	}
+	if gotMethod != "PATCH" || gotPath != "/channels/T1" {
+		t.Fatalf("got %s %s, want PATCH /channels/T1", gotMethod, gotPath)
+	}
+	if gotBody != `{"archived":false}` {
+		t.Fatalf("body=%q, want {\"archived\":false}", gotBody)
+	}
+}
+
+func TestSetThreadArchived403IsForbidden(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+	}))
+	defer srv.Close()
+
+	res, err := testClient(srv).SetThreadArchived("T1", true)
+	if err != nil {
+		t.Fatalf("403 must not be an error, got %v", err)
+	}
+	if res.Status != "forbidden" {
+		t.Fatalf("status=%q, want forbidden", res.Status)
+	}
+}

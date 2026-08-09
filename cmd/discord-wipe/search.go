@@ -360,6 +360,9 @@ func liveCatchup(ctx context.Context, c *discord.Client, meID string, st *state.
 		extraSleep := 0.0
 		floor429 := 0.0
 		emptyStreak := 0
+		// Messages Discord refused to delete because their parent thread is
+		// archived (error 50083), batched per page: channelID -> messageIDs.
+		pendingArchived := map[string][]string{}
 
 		for {
 			select {
@@ -424,6 +427,7 @@ func liveCatchup(ctx context.Context, c *discord.Client, meID string, st *state.
 					continue
 				}
 
+				archived := false
 				for {
 					result, derr := c.DeleteMessage(m.ChannelID, m.ID)
 					if derr != nil {
@@ -455,21 +459,123 @@ func liveCatchup(ctx context.Context, c *discord.Client, meID string, st *state.
 						}
 					case "forbidden":
 						counts.forbidden++
+					case "archived":
+						// Thread is archived; queue for the unarchive ->
+						// delete -> re-archive drain after this page.
+						pendingArchived[m.ChannelID] = append(pendingArchived[m.ChannelID], m.ID)
+						archived = true
 					}
 					break
 				}
-				st.Mark(m.ID)
+				if !archived {
+					st.Mark(m.ID)
+				}
 				sleepFor := deleteD.Seconds()
 				if extraSleep > sleepFor {
 					sleepFor = extraSleep
 				}
 				time.Sleep(time.Duration(sleepFor * float64(time.Second)))
 			}
+			if len(pendingArchived) > 0 {
+				if derr := drainArchivedThreads(c, st, pendingArchived, &counts, deleteD); derr != nil {
+					st.Save() //nolint:errcheck
+					return counts, derr
+				}
+				pendingArchived = map[string][]string{}
+			}
 			st.Save() //nolint:errcheck
 			time.Sleep(searchD)
 		}
 	}
 	return counts, nil
+}
+
+// threadDrainer is the slice of the Discord client the archived-thread
+// drain needs. *discord.Client satisfies it; tests use a fake.
+type threadDrainer interface {
+	SetThreadArchived(channelID string, archived bool) (discord.DeleteResult, error)
+	DeleteMessage(channelID, msgID string) (discord.DeleteResult, error)
+}
+
+// drainArchivedThreads deletes messages Discord refused while their parent
+// thread was archived (error 50083): unarchive the thread once, delete the
+// pending messages, then re-archive. Re-archive is best-effort and logged -
+// a thread left unarchived is visible but harmless. Returns non-nil only on
+// terminal 401.
+func drainArchivedThreads(c threadDrainer, st *state.State, pending map[string][]string, counts *catchupCounts, deleteD time.Duration) error {
+	for chID, ids := range pending {
+		fmt.Printf("  thread %s: unarchiving to delete %d message(s)\n", chID, len(ids))
+
+		var res discord.DeleteResult
+		for {
+			var err error
+			res, err = c.SetThreadArchived(chID, false)
+			if err != nil {
+				return err // terminal 401
+			}
+			if res.Status == "retry" {
+				fmt.Printf("    rate-limited on unarchive; sleep %.1fs\n", res.RetryAfter)
+				time.Sleep(time.Duration(res.RetryAfter * float64(time.Second)))
+				continue
+			}
+			break
+		}
+		if res.Status != "ok" {
+			// No permission / locked / thread gone: leave the IDs unmarked
+			// (skipped, not silently marked done) and count them forbidden.
+			fmt.Printf("  thread %s: cannot unarchive (%s); %d message(s) skipped\n", chID, res.Status, len(ids))
+			counts.forbidden += len(ids)
+			continue
+		}
+		time.Sleep(deleteD)
+
+		for _, id := range ids {
+			var status string
+			for {
+				dres, derr := c.DeleteMessage(chID, id)
+				if derr != nil {
+					st.Save()   //nolint:errcheck
+					return derr // terminal 401
+				}
+				status = dres.Status
+				if status == "retry" {
+					fmt.Printf("    rate-limited; sleep %.1fs\n", dres.RetryAfter)
+					time.Sleep(time.Duration(dres.RetryAfter * float64(time.Second)))
+					continue
+				}
+				break
+			}
+			switch status {
+			case "ok":
+				counts.ok++
+			case "gone":
+				counts.gone++
+			default:
+				counts.forbidden++
+			}
+			st.Mark(id)
+			time.Sleep(deleteD)
+		}
+
+		for {
+			var err error
+			res, err = c.SetThreadArchived(chID, true)
+			if err != nil {
+				return err // terminal 401
+			}
+			if res.Status == "retry" {
+				fmt.Printf("    rate-limited on re-archive; sleep %.1fs\n", res.RetryAfter)
+				time.Sleep(time.Duration(res.RetryAfter * float64(time.Second)))
+				continue
+			}
+			break
+		}
+		if res.Status != "ok" {
+			fmt.Printf("  WARN thread %s: re-archive failed (%s); thread left unarchived\n", chID, res.Status)
+		}
+		time.Sleep(deleteD)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

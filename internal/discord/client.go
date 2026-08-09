@@ -7,6 +7,7 @@
 package discord
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -335,8 +336,18 @@ func (c *Client) SearchMessages(scope string, scopeID string, params SearchParam
 
 // DeleteResult is the outcome of a delete operation.
 type DeleteResult struct {
-	Status     string  // "ok", "gone", "forbidden", "retry", "auth"
+	Status     string  // "ok", "gone", "forbidden", "archived", "retry", "auth"
 	RetryAfter float64 // seconds to wait before next attempt
+}
+
+// errCodeArchivedThread is Discord's "Thread is archived" error (50083):
+// deletes in archived threads are refused until the thread is unarchived.
+const errCodeArchivedThread = 50083
+
+// discordErr is the error envelope Discord returns on 4xx.
+type discordErr struct {
+	Message string `json:"message"`
+	Code    int    `json:"code"`
 }
 
 // DeleteMessage deletes one message. Returns the status, a pacing hint, and a
@@ -361,10 +372,21 @@ func (c *Client) DeleteMessage(channelID, msgID string) (DeleteResult, error) {
 		return DeleteResult{Status: "gone", RetryAfter: bucketHint}, nil
 	case 400:
 		// Terminal errors: archived thread, missing access, system message.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+		// Archived threads (50083) get their own status so the caller can
+		// unarchive -> delete -> re-archive instead of skipping forever.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
 		c.log.Debug("delete terminal 400", "channel", channelID, "msg", msgID, "body", string(body))
+		var de discordErr
+		if json.Unmarshal(body, &de) == nil && de.Code == errCodeArchivedThread {
+			return DeleteResult{Status: "archived"}, nil
+		}
 		return DeleteResult{Status: "forbidden"}, nil
 	case 403:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
+		var de discordErr
+		if json.Unmarshal(body, &de) == nil && de.Code == errCodeArchivedThread {
+			return DeleteResult{Status: "archived"}, nil
+		}
 		return DeleteResult{Status: "forbidden"}, nil
 	case 429:
 		retry := parseRetryAfter(resp)
@@ -380,6 +402,45 @@ func (c *Client) DeleteMessage(channelID, msgID string) (DeleteResult, error) {
 			return DeleteResult{Status: "retry", RetryAfter: 5}, nil
 		}
 		c.log.Warn("unexpected delete response", "status", resp.StatusCode)
+		return DeleteResult{Status: "retry", RetryAfter: 2}, nil
+	}
+}
+
+// SetThreadArchived archives or unarchives a thread (PATCH /channels/{id}).
+// Same status vocabulary as DeleteResult: "ok", "gone" (thread deleted),
+// "forbidden" (no permission / locked thread), "retry" (429 or network),
+// "auth" (terminal 401, non-nil AuthError).
+func (c *Client) SetThreadArchived(channelID string, archived bool) (DeleteResult, error) {
+	url := fmt.Sprintf("%s/channels/%s", c.baseURL, channelID)
+	payload, _ := json.Marshal(map[string]bool{"archived": archived})
+	resp, err := c.doBody("PATCH", url, nil, payload)
+	if err != nil {
+		c.log.Error("thread archive request failed", "err", err)
+		return DeleteResult{Status: "retry", RetryAfter: 5}, nil
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case 200:
+		return DeleteResult{Status: "ok", RetryAfter: bucketPacing(resp)}, nil
+	case 404:
+		return DeleteResult{Status: "gone"}, nil
+	case 403:
+		return DeleteResult{Status: "forbidden"}, nil
+	case 429:
+		retry := parseRetryAfter(resp)
+		if retry == 0 {
+			retry = 1
+		}
+		return DeleteResult{Status: "retry", RetryAfter: retry}, nil
+	case 401:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 500))
+		return DeleteResult{Status: "auth"}, &AuthError{Message: string(body)}
+	default:
+		if resp.StatusCode >= 500 {
+			return DeleteResult{Status: "retry", RetryAfter: 5}, nil
+		}
+		c.log.Warn("unexpected thread archive response", "status", resp.StatusCode)
 		return DeleteResult{Status: "retry", RetryAfter: 2}, nil
 	}
 }
@@ -523,24 +584,37 @@ func (c *Client) CloseDM(channelID string) error {
 // ---------------------------------------------------------------------------
 
 func (c *Client) do(method, url string, query map[string]string) (*http.Response, error) {
-	req, err := http.NewRequest(method, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", c.token)
-	req.Header.Set("User-Agent", UserAgent)
-	req.Header.Set("Accept", "application/json")
-	if query != nil {
-		q := req.URL.Query()
-		for k, v := range query {
-			q.Set(k, v)
-		}
-		req.URL.RawQuery = q.Encode()
-	}
+	return c.doBody(method, url, query, nil)
+}
 
+// doBody is do with an optional JSON request body. The request is rebuilt on
+// every retry so the body reader is never consumed twice.
+func (c *Client) doBody(method, url string, query map[string]string, body []byte) (*http.Response, error) {
 	var attempt int
 	for {
 		attempt++
+		var rdr io.Reader
+		if body != nil {
+			rdr = bytes.NewReader(body)
+		}
+		req, err := http.NewRequest(method, url, rdr)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", c.token)
+		req.Header.Set("User-Agent", UserAgent)
+		req.Header.Set("Accept", "application/json")
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if query != nil {
+			q := req.URL.Query()
+			for k, v := range query {
+				q.Set(k, v)
+			}
+			req.URL.RawQuery = q.Encode()
+		}
+
 		resp, err := c.client.Do(req)
 		if err != nil {
 			if attempt >= DefaultRetry {
