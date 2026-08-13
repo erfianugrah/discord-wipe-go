@@ -154,7 +154,7 @@ connection-level retry with bounded backoff in `client.do`.
 ## Commands (dev box)
 
 ```sh
-go test ./... -race          # 30 tests; CI runs exactly this
+go test ./... -race          # 33 tests; CI runs exactly this
 go vet ./...
 gofmt -l cmd/ internal/
 CGO_ENABLED=0 go build -o /dev/null ./cmd/discord-wipe/

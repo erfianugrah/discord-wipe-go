@@ -22,7 +22,10 @@ targeted wipes, backups, and account cleanup.
    (`GET /users/@me/guilds`) + open DMs (`GET /users/@me/channels`) and
    queries `messages/search?author_id=<self>&max_id=<cutoff_snowflake>` on
    each scope, deleting every hit. The cutoff is encoded as a Discord
-   snowflake so retention is filtered server-side. Hits inside archived
+   snowflake so retention is filtered server-side. A scope's window can be
+   pinned with `RETENTION_OVERRIDES` (see **Configuration**) - e.g. keep 2
+   days in one guild while the rest of the account follows the global
+   window. Hits inside archived
    threads (Discord refuses deletes there, error 50083) are not skipped:
    the thread is unarchived, the messages deleted, then the thread is
    re-archived.
@@ -56,6 +59,7 @@ env-backed:
 | Env | Flag | Default | Meaning |
 |---|---|---|---|
 | `RETENTION_DAYS` | `--retention-days` | `14` | Delete messages older than N days. |
+| `RETENTION_OVERRIDES` | `--retention-override` | - | Comma-separated `guild:<id>:<days>` / `channel:<id>:<days>` entries pinning one scope's window (live catch-up only; the export phase always uses the global window). Malformed entries are fatal at startup. |
 | `INTERVAL_HOURS` | `--interval-hours` | `24` | Hours between passes (with `--watch`). |
 | `DELETE_DELAY` | `--delete-delay` | `1.0` | Floor seconds between DELETEs (safety floor — see below). |
 | `SEARCH_DELAY` | `--search-delay` | `15.0` | Seconds between search-page fetches. |
@@ -84,14 +88,15 @@ A push to `main` builds `:main` + `:sha-<short>`; a `v*` tag also builds
 docker compose pull && docker compose up -d
 ```
 
-`.env` must contain `DISCORD_TOKEN=...` (it is the only source of the token).
+`.env` must contain `DISCORD_TOKEN=...` (it is the only source of the
+token), plus any optional overrides such as `RETENTION_OVERRIDES`.
 Data lives outside the stack dir (default `/mnt/user/discord-wipe/`): the
 read-only `export/` and the read-write `state/`.
 
 ## Development
 
 ```sh
-go test ./... -race        # 30 tests
+go test ./... -race        # 33 tests
 go vet ./...
 gofmt -l cmd/ internal/
 CGO_ENABLED=0 go build -o /dev/null ./cmd/discord-wipe/
