@@ -71,6 +71,17 @@ internal/snowflake/      snowflake <-> time helpers (the retention max_id bound)
 = `now - RETENTION_DAYS`, encoded as a snowflake `max_id`. State persists
 deleted IDs so a crash mid-pass re-attempts nothing.
 
+Per-scope retention overrides (v1.2.0+): `RETENTION_OVERRIDES` (env,
+comma-separated) or `--retention-override` (repeatable) entries of the form
+`guild:<id>:<days>` / `channel:<id>:<days>` pin one scope's window while
+everything else follows `RETENTION_DAYS` (`overrides.go`). Two caveats:
+overrides apply to the **live catch-up phase only** - the export phase keys
+off message timestamps, not guilds (export channels carry no guild ID), so
+an override LONGER than the global window does not protect export messages
+(shorter overrides, the normal case, are unaffected). And a malformed entry
+is **fatal at startup**, never silently dropped. Tests:
+`TestParseRetentionOverrides`, `TestTargetCutoffSF`, `TestResolveSliceEnv`.
+
 Archived threads (v1.1.0+): Discord refuses deletes inside archived
 threads (400/403 with code 50083). `liveCatchup` batches those IDs per
 search page (`channelID -> []msgID`) and drains them after the page via
@@ -199,25 +210,29 @@ calls `Mark()` so catch-up doesn't double-count.
   # cutoff must be ~RETENTION_DAYS ago, NOT "now".
   ```
 - **`.env` is load-bearing and fragile.** `compose.yaml` has `env_file: .env`
-  and composer stores no env for this stack, so the on-disk `.env`
-  (`DISCORD_TOKEN=...`) on nixos is the only token source. Composer
-  pull/up ops git-clean it away (and a re-clone deletes it too), after
-  which every `up` 500s with `.env not found` (the running container
-  keeps working - its env is baked in at create time). Recover WITHOUT
-  the token entering the agent's context by piping it out of the running
-  container on servarr into the file on nixos:
+  and composer stores no env for this stack, so the on-disk `.env` on nixos
+  is the only source of `DISCORD_TOKEN` and (since v1.2.0)
+  `RETENTION_OVERRIDES`. Composer pull/up ops git-clean it away (and a
+  re-clone deletes it too), after which every `up` 500s with `.env not
+  found` (the running container keeps working - its env is baked in at
+  create time). Recover WITHOUT the token entering the agent's context by
+  piping both keys out of the running container on servarr into the file
+  on nixos:
   ```sh
   ssh servarr 'docker inspect discord-wipe \
     --format "{{range .Config.Env}}{{println .}}{{end}}" \
-    | sed -n "s/^DISCORD_TOKEN=//p" | tr -d "\r" \
-    | sed "s/^/DISCORD_TOKEN=/"' \
+    | grep -E "^(DISCORD_TOKEN|RETENTION_OVERRIDES)=" | tr -d "\r"' \
     | ssh nixos 'cat > /var/lib/composer/stacks/discord-wipe/.env; \
       chmod 600 /var/lib/composer/stacks/discord-wipe/.env'
   ```
   (distroless has no `printenv`/shell, so `docker exec ... printenv`
   FAILS - worse, its error text lands on stdout and will be mistaken for
-  the token if captured. The `docker inspect` + sed path above never
-  prints the token. Verify with `wc -c`: expect 85 bytes, 14 + 70 + \n.)
+  the token if captured. The `docker inspect` path above never prints the
+  token. Verify with `grep -c '^DISCORD_TOKEN=' .env` = 1; the token line
+  alone is 85 bytes. If the running container predates the override being
+  set, `RETENTION_OVERRIDES` is not in its env and must be re-added
+  manually - the value is confidential and lives ONLY in `.env` + the
+  container env, never in this public repo.)
 - **Data** lives at `/mnt/user/discord-wipe/` (override via
   `DISCORD_WIPE_DATA_DIR`), OUTSIDE the stack dir so it survives re-clones:
   `export/` (RO) + `state/` (RW), owned `99:100` to match the nonroot user.

@@ -17,7 +17,7 @@ import (
 	"github.com/erfianugrah/discord-wipe-go/internal/state"
 )
 
-var version = "1.1.0"
+var version = "1.2.0"
 
 var (
 	token          string
@@ -34,6 +34,9 @@ var (
 	ntfyURL        string
 	metricsBind    string
 	metricsEnabled bool
+
+	// run only: per-scope retention overrides (see overrides.go)
+	retentionOverrides []string
 
 	// search/purge shared
 	searchGuilds   []string

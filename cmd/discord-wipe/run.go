@@ -15,7 +15,6 @@ import (
 
 	"github.com/erfianugrah/discord-wipe-go/internal/discord"
 	"github.com/erfianugrah/discord-wipe-go/internal/export"
-	"github.com/erfianugrah/discord-wipe-go/internal/snowflake"
 	"github.com/erfianugrah/discord-wipe-go/internal/state"
 )
 
@@ -54,6 +53,19 @@ With --watch, loops forever. Otherwise runs one pass and exits.`,
 		watch = resolveBool(cmd, "watch", "WATCH", false)
 		statePath = resolveString(cmd, "state", "STATE_PATH", "/data/state/state.json")
 		exportDir = resolveString(cmd, "export-dir", "EXPORT_DIR", "/data/export/Messages")
+
+		// Per-scope retention overrides (live catchup only - see overrides.go).
+		// A malformed entry is fatal: a silently dropped retention rule
+		// deletes (or keeps) the wrong messages.
+		overrideList := resolveSlice(cmd, "retention-override", "RETENTION_OVERRIDES")
+		overrides, oerr := parseRetentionOverrides(overrideList)
+		if oerr != nil {
+			fmt.Fprintf(os.Stderr, "[FATAL] %v\n", oerr)
+			os.Exit(2)
+		}
+		if len(overrides) > 0 {
+			slog.Info("retention overrides active", "scopes", len(overrides))
+		}
 
 		// --- state init with parking ---
 		st, err := state.New(statePath)
@@ -155,7 +167,8 @@ With --watch, loops forever. Otherwise runs one pass and exits.`,
 				)
 			}
 
-			cutoff := retentionCutoff(time.Now().UTC(), retentionDays)
+			passNow := time.Now().UTC()
+			cutoff := retentionCutoff(passNow, retentionDays)
 			slog.Info("pass start", "cutoff", cutoff.Format(time.RFC3339), "retention_days", retentionDays)
 			t0 := time.Now()
 
@@ -169,7 +182,7 @@ With --watch, loops forever. Otherwise runs one pass and exits.`,
 
 			// --- live catchup phase ---
 			if passErr == nil && ctx.Err() == nil {
-				passErr = phaseLiveCatchupAll(ctx, c, me.ID, st, cutoff, dryRun)
+				passErr = phaseLiveCatchupAll(ctx, c, me.ID, st, passNow, overrides, dryRun)
 			}
 
 			// A 401 anywhere in the pass is terminal — the token was rejected.
@@ -383,12 +396,12 @@ func phaseExport(ctx context.Context, c *discord.Client, meID string, st *state.
 // ---------------------------------------------------------------------------
 
 func phaseLiveCatchupAll(ctx context.Context, c *discord.Client, meID string, st *state.State,
-	cutoff time.Time, dryRun bool) error {
+	now time.Time, overrides map[string]float64, dryRun bool) error {
 
-	cutoffSF := snowflake.At(cutoff)
 	guilds, _ := c.ListGuilds()
 	dms, _ := c.ListDMs()
-	slog.Info("catchup", "guilds", len(guilds), "dms", len(dms), "cutoff", cutoff.Format(time.RFC3339))
+	slog.Info("catchup", "guilds", len(guilds), "dms", len(dms),
+		"retention_days", retentionDays, "overrides", len(overrides))
 
 	var targets []ScopedTarget
 	for _, g := range guilds {
@@ -403,7 +416,7 @@ func phaseLiveCatchupAll(ctx context.Context, c *discord.Client, meID string, st
 			slog.Info("skip excluded guild", "id", g.ID, "name", g.Name)
 			continue
 		}
-		targets = append(targets, ScopedTarget{"guild", g.ID, g.Name})
+		targets = append(targets, ScopedTarget{"guild", g.ID, g.Name, 0})
 	}
 	for _, ch := range dms {
 		skip := false
@@ -421,10 +434,20 @@ func phaseLiveCatchupAll(ctx context.Context, c *discord.Client, meID string, st
 		if ch.Type == 3 {
 			kind = "groupdm"
 		}
-		targets = append(targets, ScopedTarget{"channel", ch.ID, kind + ":" + ch.ID})
+		targets = append(targets, ScopedTarget{"channel", ch.ID, kind + ":" + ch.ID, 0})
 	}
 
-	counts, err := liveCatchup(ctx, c, meID, st, targets, cutoffSF, dryRun)
+	// Per-target cutoffs: an override pins its scope's window, everything
+	// else follows the global retention.
+	for i := range targets {
+		sf, days, overridden := targetCutoffSF(now, retentionDays, targets[i].Scope, targets[i].ID, overrides)
+		targets[i].CutoffSF = sf
+		if overridden {
+			slog.Info("retention override", "target", targets[i].Label, "days", days)
+		}
+	}
+
+	counts, err := liveCatchup(ctx, c, meID, st, targets, dryRun)
 	slog.Info("catchup done", "ok", counts.ok, "gone", counts.gone, "forbidden", counts.forbidden)
 	return err
 }
@@ -510,6 +533,7 @@ func init() {
 	cmdRun.Flags().Float64Var(&intervalHours, "interval-hours", envFloat("INTERVAL_HOURS", 24), "hours between passes when --watch")
 	cmdRun.Flags().BoolVar(&watch, "watch", envBool("WATCH", false), "loop forever instead of single pass")
 	cmdRun.Flags().BoolVar(&dryRun, "dry-run", false, "report without deleting")
+	cmdRun.Flags().StringSliceVar(&retentionOverrides, "retention-override", nil, "per-scope retention: guild:<id>:<days> or channel:<id>:<days> (repeatable; env RETENTION_OVERRIDES, comma-separated)")
 	cmdRun.Flags().StringSliceVar(&excludeGuilds, "exclude-guild", nil, "guild ID to skip (repeatable)")
 	cmdRun.Flags().StringSliceVar(&excludeChans, "exclude-channel", nil, "channel ID to skip (repeatable)")
 

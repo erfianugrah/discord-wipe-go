@@ -8,6 +8,7 @@ services:
     env_file: .env
     environment:
       - RETENTION_DAYS=7
+      - RETENTION_OVERRIDES=${RETENTION_OVERRIDES:-}
       - INTERVAL_HOURS=24
       - DELETE_DELAY=1.0
       - SEARCH_DELAY=15.0

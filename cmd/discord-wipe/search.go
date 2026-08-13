@@ -294,10 +294,10 @@ Use 'search' first to preview what would be deleted.`,
 		// Build targets
 		var targets []ScopedTarget
 		for _, gid := range searchGuilds {
-			targets = append(targets, ScopedTarget{"guild", gid, "guild:" + gid})
+			targets = append(targets, ScopedTarget{"guild", gid, "guild:" + gid, cutoffSF})
 		}
 		for _, cid := range searchChannels {
-			targets = append(targets, ScopedTarget{"channel", cid, "channel:" + cid})
+			targets = append(targets, ScopedTarget{"channel", cid, "channel:" + cid, cutoffSF})
 		}
 
 		var labels []string
@@ -312,7 +312,7 @@ Use 'search' first to preview what would be deleted.`,
 			labels, cutoff.Format(time.RFC3339), retentionDays, dryLabel)
 
 		t0 := time.Now()
-		counts, err := liveCatchup(ctx, c, me.ID, s, targets, cutoffSF, dryRun)
+		counts, err := liveCatchup(ctx, c, me.ID, s, targets, dryRun)
 		s.LastPassAt = time.Now().UTC().Format(time.RFC3339)
 		s.Save() //nolint:errcheck
 		if _, ok := err.(*discord.AuthError); ok {
@@ -330,8 +330,12 @@ Use 'search' first to preview what would be deleted.`,
 // ---------------------------------------------------------------------------
 
 // ScopedTarget is a wipe target: a guild or channel scope with a label.
+// CutoffSF is the delete bound for this scope (messages strictly older are
+// eligible); callers set it per target so retention overrides can narrow or
+// widen the window per scope.
 type ScopedTarget struct {
 	Scope, ID, Label string
+	CutoffSF         int64
 }
 
 type catchupCounts struct {
@@ -343,7 +347,7 @@ type catchupCounts struct {
 // token is rejected mid-sweep (terminal); per-scope 403/404 are skipped, not
 // surfaced. Shared by `run` and `purge`.
 func liveCatchup(ctx context.Context, c *discord.Client, meID string, st *state.State,
-	targets []ScopedTarget, cutoffSF int64, dryRun bool) (catchupCounts, error) {
+	targets []ScopedTarget, dryRun bool) (catchupCounts, error) {
 
 	var counts catchupCounts
 	searchD := time.Duration(searchDelay * float64(time.Second))
@@ -373,7 +377,7 @@ func liveCatchup(ctx context.Context, c *discord.Client, meID string, st *state.
 
 			params := discord.SearchParams{
 				AuthorID: meID,
-				MaxID:    cutoffSF,
+				MaxID:    t.CutoffSF,
 			}
 			total, hits, retry, serr := c.SearchMessages(t.Scope, t.ID, params)
 			if serr != nil {
