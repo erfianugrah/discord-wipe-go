@@ -184,22 +184,22 @@ calls `Mark()` so catch-up doesn't double-count.
 ## Production (servarr)
 
 - Compose stack `discord-wipe`, composer-managed. Composer now runs on
-  the MS-01 router (ssh alias `nixos`); the stack checkout lives at
-  `/var/lib/composer/stacks/discord-wipe` on nixos (in-container path
+  the MS-01 router (ssh alias `router`); the stack checkout lives at
+  `/var/lib/composer/stacks/discord-wipe` on router (in-container path
   `/opt/stacks/discord-wipe`). The stack has `auto_sync=true` with NO
   auto-deploy: a push to `main` auto-syncs the checkout (and git-cleans
   it - see the footgun catalog) but never recreates the container.
   Deploy is always a manual `pull` + `up` via the API below.
-- **Deploy / redeploy** via the composer API on nixos. The API key stays
+- **Deploy / redeploy** via the composer API on router. The API key stays
   in the local env and is piped over ssh stdin (one curl per pipe - the
   stdin config is consumed by the first curl):
   ```sh
   printf 'header = "X-API-Key: %s"\n' "$COMPOSER_API_KEY" \
-    | ssh nixos 'curl -s --config - -X POST \
+    | ssh router 'curl -s --config - -X POST \
         "http://localhost:8080/api/v1/stacks/discord-wipe/pull?async=true"'
   # recreate .env here if the pull wiped it (recipe below), then:
   printf 'header = "X-API-Key: %s"\n' "$COMPOSER_API_KEY" \
-    | ssh nixos 'curl -s --config - -X POST \
+    | ssh router 'curl -s --config - -X POST \
         "http://localhost:8080/api/v1/stacks/discord-wipe/up?async=true"'
   ```
 - **Verify the running build:**
@@ -210,19 +210,19 @@ calls `Mark()` so catch-up doesn't double-count.
   # cutoff must be ~RETENTION_DAYS ago, NOT "now".
   ```
 - **`.env` is load-bearing and fragile.** `compose.yaml` has `env_file: .env`
-  and composer stores no env for this stack, so the on-disk `.env` on nixos
+  and composer stores no env for this stack, so the on-disk `.env` on router
   is the only source of `DISCORD_TOKEN` and (since v1.2.0)
   `RETENTION_OVERRIDES`. Composer pull/up ops git-clean it away (and a
   re-clone deletes it too), after which every `up` 500s with `.env not
   found` (the running container keeps working - its env is baked in at
   create time). Recover WITHOUT the token entering the agent's context by
   piping both keys out of the running container on servarr into the file
-  on nixos:
+  on router:
   ```sh
   ssh servarr 'docker inspect discord-wipe \
     --format "{{range .Config.Env}}{{println .}}{{end}}" \
     | grep -E "^(DISCORD_TOKEN|RETENTION_OVERRIDES)=" | tr -d "\r"' \
-    | ssh nixos 'cat > /var/lib/composer/stacks/discord-wipe/.env; \
+    | ssh router 'cat > /var/lib/composer/stacks/discord-wipe/.env; \
       chmod 600 /var/lib/composer/stacks/discord-wipe/.env'
   ```
   (distroless has no `printenv`/shell, so `docker exec ... printenv`
