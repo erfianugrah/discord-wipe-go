@@ -19,8 +19,8 @@ services:
       - STATE_PATH=/data/state/state.json
       - EXPORT_DIR=/data/export/Messages
     volumes:
-      - ${DISCORD_WIPE_DATA_DIR:-/mnt/user/discord-wipe}/export:/data/export:ro
-      - ${DISCORD_WIPE_DATA_DIR:-/mnt/user/discord-wipe}/state:/data/state
+      - ${DISCORD_WIPE_DATA_DIR:-/tank/data/discord-wipe}/export:/data/export:ro
+      - ${DISCORD_WIPE_DATA_DIR:-/tank/data/discord-wipe}/state:/data/state
     ports:
       - "127.0.0.1:9090:9090"
     restart: unless-stopped
