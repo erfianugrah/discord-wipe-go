@@ -1,7 +1,7 @@
 # Stage 1: build the static binary
 # go.mod pins go 1.26.4; GOTOOLCHAIN=auto fetches that exact toolchain at
 # build time (Docker Hub has no stable golang:1.26-alpine tag yet).
-FROM golang:1.25-alpine AS builder
+FROM golang:1.27-alpine AS builder
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN GOTOOLCHAIN=auto go mod download
